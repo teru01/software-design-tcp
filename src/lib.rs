@@ -1,21 +1,21 @@
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
 use pnet::packet::{
     ip::IpNextHeaderProtocols,
-    tcp::{MutableTcpPacket, TcpFlags, TcpPacket},
+    tcp::{self, MutableTcpPacket, TcpFlags, TcpPacket},
     Packet,
 };
 use pnet::transport::{self, TransportChannelType, TransportProtocol, TransportSender};
 use pnet::util;
 use rand::{rngs::ThreadRng, Rng};
 use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::fmt::{self, Display};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
 use std::{cmp, ops::Range, str, thread};
 
 const TCP_HEADER_SIZE: usize = 20;
+static MY_IP_ADDR: Lazy<Ipv4Addr> = Lazy::new(|| "192.168.100.1".parse().unwrap());
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 pub struct SocketID(pub Ipv4Addr, pub Ipv4Addr, pub u16, pub u16);
@@ -156,13 +156,7 @@ impl TCP {
     /// ターゲットに接続し，接続済みソケットのIDを返す
     pub fn connect(&self, addr: Ipv4Addr, port: u16) -> Result<SocketID> {
         let mut rng = rand::thread_rng();
-        let mut socket = Socket::new(
-            "192.168.100.1".parse()?,
-            addr,
-            55555,
-            port,
-            TcpStatus::SynSent,
-        )?;
+        let mut socket = Socket::new(*MY_IP_ADDR, addr, 55555, port, TcpStatus::SynSent)?;
         socket.send_param.initial_seq = rng.gen_range(1..1 << 31);
         let sock_id = socket.get_sock_id();
         let mut table = self.sockets.write().unwrap();
@@ -220,11 +214,10 @@ impl TCP {
                 Some(socket) => socket, // 接続済みソケット
                 None => continue,
             };
-            if !is_correct_checksum(&tcp_packet) {
+            if !is_correct_checksum(&tcp_packet, packet.get_source(), packet.get_destination()) {
                 dbg!("invalid checksum");
                 continue;
             }
-            let sock_id = socket.get_sock_id();
             if let Err(error) = match socket.status {
                 TcpStatus::Listen => unimplemented!(),
                 TcpStatus::SynRcvd => unimplemented!(),
@@ -303,6 +296,6 @@ impl TCP {
     }
 }
 
-fn is_correct_checksum(tcp_packet: &TcpPacket) -> bool {
-    true
+fn is_correct_checksum(tcp_packet: &TcpPacket, src_ip: Ipv4Addr, dest_ip: Ipv4Addr) -> bool {
+    return tcp_packet.get_checksum() == tcp::ipv4_checksum(tcp_packet, &src_ip, &dest_ip);
 }
