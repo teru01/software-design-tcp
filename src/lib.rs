@@ -1,16 +1,24 @@
 use anyhow::{Context, Result};
-use pnet::packet::{ip::IpNextHeaderProtocols, Packet};
+use pnet::packet::{
+    ip::IpNextHeaderProtocols,
+    tcp::{MutableTcpPacket, TcpFlags},
+    Packet,
+};
 use pnet::transport::{self, TransportChannelType, TransportProtocol, TransportSender};
 use pnet::util;
+use rand::{rngs::ThreadRng, Rng};
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::{self, Display};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
 use std::time::SystemTime;
+use std::{cmp, ops::Range, str, thread};
 
-fn main() {
-    println!("Hello, world!");
-    // 送信
-}
+const TCP_HEADER_SIZE: usize = 20;
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub struct SocketID(pub Ipv4Addr, pub Ipv4Addr, pub u16, pub u16);
 
 pub struct Socket {
     pub local_addr: Ipv4Addr,
@@ -86,16 +94,17 @@ impl Socket {
         &mut self,
         seq: u32,
         ack: u32,
-        flag: u8,
+        flag: u16,
         payload: &[u8],
     ) -> Result<usize> {
-        let mut tcp_packet = TCPPacket::new(payload.len());
-        tcp_packet.set_src(self.local_port);
-        tcp_packet.set_dest(self.remote_port);
-        tcp_packet.set_seq(seq);
-        tcp_packet.set_ack(ack);
+        let mut buffer = vec![0; TCP_HEADER_SIZE + payload.len()];
+        let mut tcp_packet = MutableTcpPacket::new(&mut buffer).unwrap();
+        tcp_packet.set_source(self.local_port);
+        tcp_packet.set_destination(self.remote_port);
+        tcp_packet.set_sequence(seq);
+        tcp_packet.set_acknowledgement(ack);
         tcp_packet.set_data_offset(5);
-        tcp_packet.set_flag(flag);
+        tcp_packet.set_flags(flag.into());
         tcp_packet.set_payload(payload);
         tcp_packet.set_checksum(util::ipv4_checksum(
             &tcp_packet.packet(),
@@ -107,22 +116,67 @@ impl Socket {
         ));
         let sent_size = self
             .sender
-            .send_to(tcp_packet.clone(), IpAddr::V4(self.remote_addr))
-            .context(format!("failed to send: \n{:?}", tcp_packet))?;
+            .send_to(tcp_packet, IpAddr::V4(self.remote_addr))
+            .context(format!("failed to send: {:?}", self.get_sock_id()))?;
 
-        dbg!("sent", &tcp_packet);
-        if payload.is_empty() && tcp_packet.get_flag() == tcpflags::ACK {
-            return Ok(sent_size);
-        }
+        // dbg!("sent", &tcp_packet);
+        // if payload.is_empty() && tcp_packet.get_flag() == TcpFlags::ACK {
+        //     return Ok(sent_size);
+        // }
         Ok(sent_size)
     }
 
-    pub fn get_sock_id(&self) -> SockID {
-        SockID(
+    pub fn get_sock_id(&self) -> SocketID {
+        SocketID(
             self.local_addr,
             self.remote_addr,
             self.local_port,
             self.remote_port,
         )
+    }
+}
+
+pub struct TCP {
+    sockets: RwLock<HashMap<SocketID, Socket>>,
+}
+
+impl TCP {
+    pub fn new() -> Arc<Self> {
+        let sockets = RwLock::new(HashMap::new());
+        let tcp = Arc::new(Self { sockets });
+        let cloned_tcp = tcp.clone();
+        std::thread::spawn(move || {
+            // パケットの受信用スレッド
+            cloned_tcp.receive_handler().unwrap();
+        });
+        tcp
+    }
+
+    /// ターゲットに接続し，接続済みソケットのIDを返す
+    pub fn connect(&self, addr: Ipv4Addr, port: u16) -> Result<SocketID> {
+        let mut rng = rand::thread_rng();
+        let mut socket = Socket::new(
+            // get_source_addr_to(addr)?,
+            "127.0.0.1".parse()?,
+            addr,
+            55555,
+            port,
+            TcpStatus::SynSent,
+        )?;
+        socket.send_param.initial_seq = rng.gen_range(1..1 << 31);
+        socket.send_tcp_packet(socket.send_param.initial_seq, 0, TcpFlags::SYN, &[])?;
+        socket.send_param.unacked_seq = socket.send_param.initial_seq;
+        socket.send_param.next = socket.send_param.initial_seq + 1;
+        let mut table = self.sockets.write().unwrap();
+        let sock_id = socket.get_sock_id();
+        table.insert(sock_id, socket);
+        // ロックを外してイベントの待機．受信スレッドがロックを取得できるようにするため．
+        drop(table);
+        // self.wait_event(sock_id, TCPEventKind::ConnectionCompleted);
+        Ok(sock_id)
+    }
+
+    fn receive_handler(&self) -> Result<()> {
+        Ok(())
     }
 }
