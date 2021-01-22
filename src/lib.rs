@@ -14,6 +14,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
 use std::time::{Duration, SystemTime};
 use std::{cmp, ops::Range, str, thread};
 
+const MSS: usize = 1460;
 const TCP_HEADER_SIZE: usize = 20;
 static MY_IP_ADDR: Lazy<Ipv4Addr> = Lazy::new(|| "192.168.100.1".parse().unwrap());
 
@@ -156,7 +157,13 @@ impl TCP {
     /// ターゲットに接続し，接続済みソケットのIDを返す
     pub fn connect(&self, addr: Ipv4Addr, port: u16) -> Result<SocketID> {
         let mut rng = rand::thread_rng();
-        let mut socket = Socket::new(*MY_IP_ADDR, addr, 55555, port, TcpStatus::SynSent)?;
+        let mut socket = Socket::new(
+            *MY_IP_ADDR,
+            addr,
+            rng.gen_range(10000..60000),
+            port,
+            TcpStatus::SynSent,
+        )?;
         socket.send_param.initial_seq = rng.gen_range(1..1 << 31);
         let sock_id = socket.get_sock_id();
         let mut table = self.sockets.write().unwrap();
@@ -175,6 +182,41 @@ impl TCP {
             thread::sleep(Duration::from_secs(1));
         }
         Ok(sock_id)
+    }
+
+    /// バッファのデータを送信する．必要であれば複数のパケットに分割して送信する．
+    /// 全て送信したら（まだackされてなくても）リターンする．
+    pub fn send(&self, sock_id: SocketID, buffer: &[u8]) -> Result<()> {
+        let mut cursor = 0;
+        while cursor < buffer.len() {
+            let send_size = cmp::min(MSS, buffer.len() - cursor);
+            // dbg!("before send lock");
+            let mut table = self.sockets.write().unwrap();
+            let mut socket = table.get_mut(&sock_id).unwrap();
+            // dbg!("after send lock");
+            let mut sent = false;
+            while !(sent && socket.send_param.unacked_seq == socket.send_param.next) {
+                // 送信したものがackされていない時、再送
+                socket.send_tcp_packet(
+                    socket.send_param.next,
+                    socket.recv_param.next,
+                    TcpFlags::ACK,
+                    &buffer[cursor..cursor + send_size],
+                )?;
+                sent = true;
+                socket.send_param.next += send_size as u32;
+                // 少しの間ロックを外して待機し，受信スレッドがACKを受信できるようにしている．
+                // send_windowが0になるまで送り続け，送信がブロックされる確率を下げるため
+                drop(table);
+                thread::sleep(Duration::from_millis(100));
+                // dbg!("before send lock2");
+                table = self.sockets.write().unwrap();
+                socket = table.get_mut(&sock_id).unwrap();
+                // dbg!("after send lock2");
+            }
+            cursor += send_size;
+        }
+        Ok(())
     }
 
     fn receive_handler(&self) -> Result<()> {
@@ -269,28 +311,9 @@ impl TCP {
             && packet.get_acknowledgement() <= socket.send_param.next
         {
             socket.send_param.unacked_seq = packet.get_acknowledgement();
-        // self.delete_acked_segment_from_retransmission_queue(socket);
-        } else if socket.send_param.next < packet.get_acknowledgement() {
-            // 未送信セグメントに対するackは破棄
-            return Ok(());
-        }
-        if packet.get_flags() & TcpFlags::ACK == 0 {
-            // ACKが立っていないパケットは破棄
-            return Ok(());
         }
         if !packet.payload().is_empty() {
             // self.process_payload(socket, &packet)?;
-        }
-        if packet.get_flags() & TcpFlags::FIN > 0 {
-            socket.recv_param.next = packet.get_sequence() + 1;
-            socket.send_tcp_packet(
-                socket.send_param.next,
-                socket.recv_param.next,
-                TcpFlags::ACK,
-                &[],
-            )?;
-            socket.status = TcpStatus::CloseWait;
-            // self.publish_event(socket.get_sock_id(), TCPEventKind::DataArrived);
         }
         Ok(())
     }
