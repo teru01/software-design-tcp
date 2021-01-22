@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use pnet::packet::{
     ip::IpNextHeaderProtocols,
-    tcp::{MutableTcpPacket, TcpFlags},
+    tcp::{MutableTcpPacket, TcpFlags, TcpPacket},
     Packet,
 };
 use pnet::transport::{self, TransportChannelType, TransportProtocol, TransportSender};
@@ -177,6 +177,134 @@ impl TCP {
     }
 
     fn receive_handler(&self) -> Result<()> {
+        dbg!("begin recv thread");
+        let (_, mut receiver) = transport::transport_channel(
+            65535,
+            TransportChannelType::Layer3(IpNextHeaderProtocols::Tcp), // IPアドレスが必要なので，IPパケットレベルで取得．
+        )
+        .unwrap();
+        let mut packet_iter = transport::ipv4_packet_iter(&mut receiver);
+        loop {
+            let (packet, remote_addr) = match packet_iter.next() {
+                Ok((p, r)) => (p, r),
+                Err(_) => continue,
+            };
+            let local_addr = packet.get_destination();
+            // pnetのTcpPacketを生成
+            let tcp_packet = match TcpPacket::new(packet.payload()) {
+                Some(p) => p,
+                None => {
+                    continue;
+                }
+            };
+            let remote_addr = match remote_addr {
+                IpAddr::V4(addr) => addr,
+                _ => {
+                    continue;
+                }
+            };
+            let mut table = self.sockets.write().unwrap();
+            let socket = match table.get_mut(&SocketID(
+                local_addr,
+                remote_addr,
+                tcp_packet.get_destination(),
+                tcp_packet.get_source(),
+            )) {
+                Some(socket) => socket, // 接続済みソケット
+                None => continue,
+            };
+            if !is_correct_checksum(&tcp_packet) {
+                dbg!("invalid checksum");
+                continue;
+            }
+            let sock_id = socket.get_sock_id();
+            if let Err(error) = match socket.status {
+                TcpStatus::Listen => unimplemented!(),
+                TcpStatus::SynRcvd => unimplemented!(),
+                TcpStatus::SynSent => self.synsent_handler(socket, &tcp_packet),
+                TcpStatus::Established => self.established_handler(socket, &tcp_packet),
+                TcpStatus::CloseWait | TcpStatus::LastAck => unimplemented!(),
+                TcpStatus::FinWait1 | TcpStatus::FinWait2 => unimplemented!(),
+                _ => {
+                    dbg!("not implemented state");
+                    Ok(())
+                }
+            } {
+                dbg!(error);
+            }
+        }
+    }
+
+    /// SYNSENT状態のソケットに到着したパケットの処理
+    fn synsent_handler(&self, socket: &mut Socket, packet: &TcpPacket) -> Result<()> {
+        dbg!("synsent handler");
+        if packet.get_flags() & TcpFlags::ACK > 0
+            && socket.send_param.unacked_seq <= packet.get_acknowledgement()
+            && packet.get_acknowledgement() <= socket.send_param.next
+            && packet.get_flags() & TcpFlags::SYN > 0
+        {
+            socket.recv_param.next = packet.get_sequence() + 1;
+            socket.recv_param.initial_seq = packet.get_sequence();
+            socket.send_param.unacked_seq = packet.get_acknowledgement();
+            // socket.send_param.window = packet.get_window_size();
+            if socket.send_param.unacked_seq > socket.send_param.initial_seq {
+                socket.status = TcpStatus::Established;
+                socket.send_tcp_packet(
+                    socket.send_param.next,
+                    socket.recv_param.next,
+                    TcpFlags::ACK,
+                    &[],
+                )?;
+                dbg!("status: synsent ->", &socket.status);
+            // self.publish_event(socket.get_sock_id(), TCPEventKind::ConnectionCompleted);
+            } else {
+                socket.status = TcpStatus::SynRcvd;
+                socket.send_tcp_packet(
+                    socket.send_param.next,
+                    socket.recv_param.next,
+                    TcpFlags::ACK,
+                    &[],
+                )?;
+                dbg!("status: synsent ->", &socket.status);
+            }
+        }
         Ok(())
     }
+
+    /// ESTABLISHED状態のソケットに到着したパケットの処理
+    fn established_handler(&self, socket: &mut Socket, packet: &TcpPacket) -> Result<()> {
+        dbg!("established handler");
+        if socket.send_param.unacked_seq < packet.get_acknowledgement()
+            && packet.get_acknowledgement() <= socket.send_param.next
+        {
+            socket.send_param.unacked_seq = packet.get_acknowledgement();
+        // self.delete_acked_segment_from_retransmission_queue(socket);
+        } else if socket.send_param.next < packet.get_acknowledgement() {
+            // 未送信セグメントに対するackは破棄
+            return Ok(());
+        }
+        if packet.get_flags() & TcpFlags::ACK == 0 {
+            // ACKが立っていないパケットは破棄
+            return Ok(());
+        }
+        if !packet.payload().is_empty() {
+            // self.process_payload(socket, &packet)?;
+        }
+        if packet.get_flags() & TcpFlags::FIN > 0 {
+            socket.recv_param.next = packet.get_sequence() + 1;
+            socket.send_tcp_packet(
+                socket.send_param.next,
+                socket.recv_param.next,
+                TcpFlags::ACK,
+                &[],
+            )?;
+            socket.status = TcpStatus::CloseWait;
+            // self.publish_event(socket.get_sock_id(), TCPEventKind::DataArrived);
+        }
+        Ok(())
+    }
+}
+
+fn is_correct_checksum(tcp_packet: &TcpPacket) -> bool {
+    true
 }
