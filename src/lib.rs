@@ -121,7 +121,6 @@ impl Socket {
             .send_to(tcp_packet, IpAddr::V4(self.remote_addr))
             .context(format!("failed to send: {:?}", self.get_sock_id()))?;
 
-        // dbg!("sent", &tcp_packet);
         // if payload.is_empty() && tcp_packet.get_flag() == TcpFlags::ACK {
         //     return Ok(sent_size);
         // }
@@ -190,25 +189,26 @@ impl TCP {
         let mut cursor = 0;
         while cursor < buffer.len() {
             let send_size = cmp::min(MSS, buffer.len() - cursor);
-            // dbg!("before send lock");
+            dbg!("before send lock", cursor);
             let mut table = self.sockets.write().unwrap();
             let mut socket = table.get_mut(&sock_id).unwrap();
             // dbg!("after send lock");
             let mut sent = false;
+            let current_seq = socket.send_param.next;
             while !(sent && socket.send_param.unacked_seq == socket.send_param.next) {
                 // 送信したものがackされていない時、再送
                 socket.send_tcp_packet(
-                    socket.send_param.next,
+                    current_seq,
                     socket.recv_param.next,
                     TcpFlags::ACK,
                     &buffer[cursor..cursor + send_size],
                 )?;
                 sent = true;
-                socket.send_param.next += send_size as u32;
+                socket.send_param.next = current_seq + send_size as u32;
                 // 少しの間ロックを外して待機し，受信スレッドがACKを受信できるようにしている．
                 // send_windowが0になるまで送り続け，送信がブロックされる確率を下げるため
                 drop(table);
-                thread::sleep(Duration::from_millis(100));
+                thread::sleep(Duration::from_secs(1));
                 // dbg!("before send lock2");
                 table = self.sockets.write().unwrap();
                 socket = table.get_mut(&sock_id).unwrap();
@@ -310,7 +310,10 @@ impl TCP {
         if socket.send_param.unacked_seq < packet.get_acknowledgement()
             && packet.get_acknowledgement() <= socket.send_param.next
         {
+            dbg!("recved");
             socket.send_param.unacked_seq = packet.get_acknowledgement();
+            dbg!(socket.send_param.unacked_seq);
+            dbg!(socket.send_param.next);
         }
         if !packet.payload().is_empty() {
             // self.process_payload(socket, &packet)?;
