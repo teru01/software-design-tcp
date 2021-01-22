@@ -8,8 +8,8 @@ ip netns add labo2
 
 ip link add labo1-eth netns labo1 type veth peer labo2-eth netns labo2
 
-ip netns exec labo1 ip address add 192.168.0.1/24 dev labo1-eth
-ip netns exec labo2 ip address add 192.168.100.1/24 dev labo2-eth
+ip netns exec labo1 ip address add 192.168.100.1/24 dev labo1-eth
+ip netns exec labo2 ip address add 192.168.100.2/24 dev labo2-eth
 
 ip netns exec labo1 ip link set lo up
 ip netns exec labo1 ip link set labo1-eth up

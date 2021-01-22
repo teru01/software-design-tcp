@@ -105,6 +105,7 @@ impl Socket {
         tcp_packet.set_acknowledgement(ack);
         tcp_packet.set_data_offset(5);
         tcp_packet.set_flags(flag.into());
+        tcp_packet.set_window(5000); // TODO
         tcp_packet.set_payload(payload);
         tcp_packet.set_checksum(util::ipv4_checksum(
             &tcp_packet.packet(),
@@ -155,11 +156,18 @@ impl TCP {
     /// ターゲットに接続し，接続済みソケットのIDを返す
     pub fn connect(&self, addr: Ipv4Addr, port: u16) -> Result<SocketID> {
         let mut rng = rand::thread_rng();
-        let mut socket = Socket::new("127.0.0.1".parse()?, addr, 55555, port, TcpStatus::SynSent)?;
+        let mut socket = Socket::new(
+            "192.168.100.1".parse()?,
+            addr,
+            55555,
+            port,
+            TcpStatus::SynSent,
+        )?;
         socket.send_param.initial_seq = rng.gen_range(1..1 << 31);
         let sock_id = socket.get_sock_id();
         let mut table = self.sockets.write().unwrap();
         table.insert(sock_id, socket);
+        drop(table);
         loop {
             let mut table = self.sockets.write().unwrap();
             let mut socket = table.get_mut(&sock_id).context("no such socket")?;
