@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::fmt::{self, Display};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use std::{cmp, ops::Range, str, thread};
 
 const TCP_HEADER_SIZE: usize = 20;
@@ -155,24 +155,23 @@ impl TCP {
     /// ターゲットに接続し，接続済みソケットのIDを返す
     pub fn connect(&self, addr: Ipv4Addr, port: u16) -> Result<SocketID> {
         let mut rng = rand::thread_rng();
-        let mut socket = Socket::new(
-            // get_source_addr_to(addr)?,
-            "127.0.0.1".parse()?,
-            addr,
-            55555,
-            port,
-            TcpStatus::SynSent,
-        )?;
+        let mut socket = Socket::new("127.0.0.1".parse()?, addr, 55555, port, TcpStatus::SynSent)?;
         socket.send_param.initial_seq = rng.gen_range(1..1 << 31);
-        socket.send_tcp_packet(socket.send_param.initial_seq, 0, TcpFlags::SYN, &[])?;
-        socket.send_param.unacked_seq = socket.send_param.initial_seq;
-        socket.send_param.next = socket.send_param.initial_seq + 1;
-        let mut table = self.sockets.write().unwrap();
         let sock_id = socket.get_sock_id();
+        let mut table = self.sockets.write().unwrap();
         table.insert(sock_id, socket);
-        // ロックを外してイベントの待機．受信スレッドがロックを取得できるようにするため．
-        drop(table);
-        // self.wait_event(sock_id, TCPEventKind::ConnectionCompleted);
+        loop {
+            let mut table = self.sockets.write().unwrap();
+            let mut socket = table.get_mut(&sock_id).context("no such socket")?;
+            if socket.status == TcpStatus::Established {
+                break;
+            }
+            socket.send_tcp_packet(socket.send_param.initial_seq, 0, TcpFlags::SYN, &[])?;
+            socket.send_param.unacked_seq = socket.send_param.initial_seq;
+            socket.send_param.next = socket.send_param.initial_seq + 1;
+            drop(table);
+            thread::sleep(Duration::from_secs(1));
+        }
         Ok(sock_id)
     }
 
@@ -256,16 +255,7 @@ impl TCP {
                     &[],
                 )?;
                 dbg!("status: synsent ->", &socket.status);
-            // self.publish_event(socket.get_sock_id(), TCPEventKind::ConnectionCompleted);
-            } else {
-                socket.status = TcpStatus::SynRcvd;
-                socket.send_tcp_packet(
-                    socket.send_param.next,
-                    socket.recv_param.next,
-                    TcpFlags::ACK,
-                    &[],
-                )?;
-                dbg!("status: synsent ->", &socket.status);
+                // self.publish_event(socket.get_sock_id(), TCPEventKind::ConnectionCompleted);
             }
         }
         Ok(())
