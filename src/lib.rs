@@ -7,12 +7,12 @@ use pnet::packet::{
 };
 use pnet::transport::{self, TransportChannelType, TransportProtocol, TransportSender};
 use pnet::util;
-use rand::{rngs::ThreadRng, Rng};
+use rand::Rng;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Arc, Condvar, Mutex, RwLock, RwLockWriteGuard};
-use std::time::{Duration, SystemTime};
-use std::{cmp, ops::Range, str, thread};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use std::{cmp, thread};
 
 const MSS: usize = 1460;
 const TCP_HEADER_SIZE: usize = 20;
@@ -100,14 +100,23 @@ impl Socket {
     ) -> Result<usize> {
         let mut buffer = vec![0; TCP_HEADER_SIZE + payload.len()];
         let mut tcp_packet = MutableTcpPacket::new(&mut buffer).unwrap();
+        // 送信元のポート番号
         tcp_packet.set_source(self.local_port);
+        // 宛先のポート番号
         tcp_packet.set_destination(self.remote_port);
+        // シーケンス番号。単位はオクテット
         tcp_packet.set_sequence(seq);
+        // 確認応答番号。単位はオクテット
         tcp_packet.set_acknowledgement(ack);
+        // セグメント中のペイロード領域のオフセット。単位は4オクテット
         tcp_packet.set_data_offset(5);
+        // 制御フラグ
         tcp_packet.set_flags(flag.into());
-        tcp_packet.set_window(5000); // TODO
+        // ウィンドウサイズ。単位はオクテット。今回は適当な値を入れている
+        tcp_packet.set_window(5000);
+        // ペイロード
         tcp_packet.set_payload(payload);
+        // チェックサム。UDPと同様に擬似ヘッダを利用する。
         tcp_packet.set_checksum(util::ipv4_checksum(
             &tcp_packet.packet(),
             8,
@@ -120,10 +129,6 @@ impl Socket {
             .sender
             .send_to(tcp_packet, IpAddr::V4(self.remote_addr))
             .context(format!("failed to send: {:?}", self.get_sock_id()))?;
-
-        // if payload.is_empty() && tcp_packet.get_flag() == TcpFlags::ACK {
-        //     return Ok(sent_size);
-        // }
         Ok(sent_size)
     }
 
@@ -159,7 +164,7 @@ impl TCP {
         let mut socket = Socket::new(
             *MY_IP_ADDR,
             addr,
-            rng.gen_range(10000..60000),
+            rng.gen_range(50000..60000), // 送信元のポート。適当に選ぶ
             port,
             TcpStatus::SynSent,
         )?;
@@ -169,6 +174,8 @@ impl TCP {
         table.insert(sock_id, socket);
         drop(table);
         loop {
+            // コネクションが確立するまでSYNを送り続ける。
+            // 本来なら最大送信回数を定めて、そこで打ち切るべき
             let mut table = self.sockets.write().unwrap();
             let mut socket = table.get_mut(&sock_id).context("no such socket")?;
             if socket.status == TcpStatus::Established {
@@ -184,15 +191,12 @@ impl TCP {
     }
 
     /// バッファのデータを送信する．必要であれば複数のパケットに分割して送信する．
-    /// 全て送信したら（まだackされてなくても）リターンする．
     pub fn send(&self, sock_id: SocketID, buffer: &[u8]) -> Result<()> {
         let mut cursor = 0;
         while cursor < buffer.len() {
             let send_size = cmp::min(MSS, buffer.len() - cursor);
-            dbg!("before send lock", cursor);
             let mut table = self.sockets.write().unwrap();
             let mut socket = table.get_mut(&sock_id).unwrap();
-            // dbg!("after send lock");
             let mut sent = false;
             let current_seq = socket.send_param.next;
             while !(sent && socket.send_param.unacked_seq == socket.send_param.next) {
@@ -206,19 +210,17 @@ impl TCP {
                 sent = true;
                 socket.send_param.next = current_seq + send_size as u32;
                 // 少しの間ロックを外して待機し，受信スレッドがACKを受信できるようにしている．
-                // send_windowが0になるまで送り続け，送信がブロックされる確率を下げるため
                 drop(table);
-                thread::sleep(Duration::from_secs(1));
-                // dbg!("before send lock2");
+                thread::sleep(Duration::from_millis(100));
                 table = self.sockets.write().unwrap();
                 socket = table.get_mut(&sock_id).unwrap();
-                // dbg!("after send lock2");
             }
             cursor += send_size;
         }
         Ok(())
     }
 
+    /// 受信スレッド用のハンドラ
     fn receive_handler(&self) -> Result<()> {
         dbg!("begin recv thread");
         let (_, mut receiver) = transport::transport_channel(
@@ -253,7 +255,7 @@ impl TCP {
                 tcp_packet.get_destination(),
                 tcp_packet.get_source(),
             )) {
-                Some(socket) => socket, // 接続済みソケット
+                Some(socket) => socket,
                 None => continue,
             };
             if !is_correct_checksum(&tcp_packet, packet.get_source(), packet.get_destination()) {
@@ -261,12 +263,8 @@ impl TCP {
                 continue;
             }
             if let Err(error) = match socket.status {
-                TcpStatus::Listen => unimplemented!(),
-                TcpStatus::SynRcvd => unimplemented!(),
                 TcpStatus::SynSent => self.synsent_handler(socket, &tcp_packet),
                 TcpStatus::Established => self.established_handler(socket, &tcp_packet),
-                TcpStatus::CloseWait | TcpStatus::LastAck => unimplemented!(),
-                TcpStatus::FinWait1 | TcpStatus::FinWait2 => unimplemented!(),
                 _ => {
                     dbg!("not implemented state");
                     Ok(())
@@ -288,7 +286,6 @@ impl TCP {
             socket.recv_param.next = packet.get_sequence() + 1;
             socket.recv_param.initial_seq = packet.get_sequence();
             socket.send_param.unacked_seq = packet.get_acknowledgement();
-            // socket.send_param.window = packet.get_window_size();
             if socket.send_param.unacked_seq > socket.send_param.initial_seq {
                 socket.status = TcpStatus::Established;
                 socket.send_tcp_packet(
@@ -298,7 +295,6 @@ impl TCP {
                     &[],
                 )?;
                 dbg!("status: synsent ->", &socket.status);
-                // self.publish_event(socket.get_sock_id(), TCPEventKind::ConnectionCompleted);
             }
         }
         Ok(())
@@ -307,16 +303,12 @@ impl TCP {
     /// ESTABLISHED状態のソケットに到着したパケットの処理
     fn established_handler(&self, socket: &mut Socket, packet: &TcpPacket) -> Result<()> {
         dbg!("established handler");
-        if socket.send_param.unacked_seq < packet.get_acknowledgement()
+        if packet.get_flags() & TcpFlags::ACK > 0
+            && socket.send_param.unacked_seq < packet.get_acknowledgement()
             && packet.get_acknowledgement() <= socket.send_param.next
         {
-            dbg!("recved");
+            dbg!("ACK recved");
             socket.send_param.unacked_seq = packet.get_acknowledgement();
-            dbg!(socket.send_param.unacked_seq);
-            dbg!(socket.send_param.next);
-        }
-        if !packet.payload().is_empty() {
-            // self.process_payload(socket, &packet)?;
         }
         Ok(())
     }
