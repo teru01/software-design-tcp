@@ -43,7 +43,6 @@ pub struct SendParam {
 pub struct RecvParam {
     pub next: u32,        // 次受信するseq
     pub initial_seq: u32, // 初期受信seq
-    pub tail: u32,        // 受信seqの最後尾
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
@@ -77,7 +76,6 @@ impl Socket {
             recv_param: RecvParam {
                 initial_seq: 0,
                 next: 0,
-                tail: 0,
             },
             status,
             sender,
