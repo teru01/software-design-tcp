@@ -16,10 +16,13 @@ ip netns exec labo1 ip link set labo1-eth up
 ip netns exec labo2 ip link set lo up
 ip netns exec labo2 ip link set labo2-eth up
 
-# drop RST
+# RSTパケットをドロップする。
+# OSは受信パケットをカーネルのプロトコルスタックと生ソケットの両方に流すため、プロトコルスタックと自作TCPで競合してしまう
+# 例えば自作TCPにとって有効なパケットは、プロトコルスタックにとっては利用してないポートに対するパケットなので無効になり、RSTを返してしまう
+# RSTパケットを落とせばひとまず解決する。
 ip netns exec labo1 iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
 ip netns exec labo2 iptables -A OUTPUT -p tcp --tcp-flags RST RST -j DROP
 
-# turn off checksum offloading
+# チェックサムオフロードの無効化
 ip netns exec labo1 ethtool -K labo1-eth tx off
 ip netns exec labo2 ethtool -K labo2-eth tx off
