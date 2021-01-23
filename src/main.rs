@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::{env, io, net::Ipv4Addr, str};
+use std::{env, io, net::Ipv4Addr};
 use tcp::TCP;
 
 fn main() -> Result<()> {

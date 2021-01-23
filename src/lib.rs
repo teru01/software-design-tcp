@@ -48,15 +48,8 @@ pub struct RecvParam {
 
 #[derive(PartialEq, Eq, Debug, Clone)]
 pub enum TcpStatus {
-    Listen,
     SynSent,
-    SynRcvd,
     Established,
-    FinWait1,
-    FinWait2,
-    TimeWait,
-    CloseWait,
-    LastAck,
 }
 
 impl Socket {
@@ -265,10 +258,6 @@ impl TCP {
             if let Err(error) = match socket.status {
                 TcpStatus::SynSent => self.synsent_handler(socket, &tcp_packet),
                 TcpStatus::Established => self.established_handler(socket, &tcp_packet),
-                _ => {
-                    dbg!("not implemented state");
-                    Ok(())
-                }
             } {
                 dbg!(error);
             }
