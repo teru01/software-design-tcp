@@ -181,36 +181,6 @@ impl TCP {
         Ok(sock_id)
     }
 
-    /// バッファのデータを送信する．必要であれば複数のパケットに分割して送信する．
-    pub fn send(&self, sock_id: SocketID, buffer: &[u8]) -> Result<()> {
-        let mut cursor = 0;
-        while cursor < buffer.len() {
-            let send_size = cmp::min(MSS, buffer.len() - cursor);
-            let mut table = self.sockets.write().unwrap();
-            let mut socket = table.get_mut(&sock_id).unwrap();
-            let mut sent = false;
-            let current_seq = socket.send_param.next;
-            while !(sent && socket.send_param.unacked_seq == socket.send_param.next) {
-                // 送信したものがackされていない時、再送
-                socket.send_tcp_packet(
-                    current_seq,
-                    socket.recv_param.next,
-                    TcpFlags::ACK,
-                    &buffer[cursor..cursor + send_size],
-                )?;
-                sent = true;
-                socket.send_param.next = current_seq + send_size as u32;
-                // 少しの間ロックを外して待機し，受信スレッドがACKを受信できるようにしている．
-                drop(table);
-                thread::sleep(Duration::from_millis(100));
-                table = self.sockets.write().unwrap();
-                socket = table.get_mut(&sock_id).unwrap();
-            }
-            cursor += send_size;
-        }
-        Ok(())
-    }
-
     /// 受信スレッド用のハンドラ
     fn receive_handler(&self) -> Result<()> {
         dbg!("begin recv thread");
@@ -289,14 +259,8 @@ impl TCP {
 
     /// ESTABLISHED状態のソケットに到着したパケットの処理
     fn established_handler(&self, socket: &mut Socket, packet: &TcpPacket) -> Result<()> {
+        // TODO: 実装続き
         dbg!("established handler");
-        if packet.get_flags() & TcpFlags::ACK > 0
-            && socket.send_param.unacked_seq < packet.get_acknowledgement()
-            && packet.get_acknowledgement() <= socket.send_param.next
-        {
-            dbg!("ACK recved");
-            socket.send_param.unacked_seq = packet.get_acknowledgement();
-        }
         Ok(())
     }
 }

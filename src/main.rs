@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::{env, io, net::Ipv4Addr};
+use std::{env, net::Ipv4Addr};
 use tcp::TCP;
 
 fn main() -> Result<()> {
@@ -13,12 +13,6 @@ fn main() -> Result<()> {
 fn client(remote_addr: Ipv4Addr, remote_port: u16) -> Result<()> {
     let tcp = TCP::new();
     let sock_id = tcp.connect(remote_addr, remote_port)?;
-    ctrlc::set_handler(move || {
-        std::process::exit(0);
-    })?;
-    loop {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        tcp.send(sock_id, input.as_bytes())?;
-    }
+    dbg!(sock_id);
+    Ok(())
 }
